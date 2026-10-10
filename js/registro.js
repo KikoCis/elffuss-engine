@@ -143,7 +143,7 @@ export const MODELS = {
     //
     // Y la segunda no puede ser una descarga disfrazada: tardó una fracción de
     // lo que el enlace necesita para mover el modelo entero, así que los bytes
-    // salieron del almacén. De minutos de espera a segundos.
+    // salieron del almacén, y la espera cae con ellos.
     //
     // Estuvo desactivado porque parecía romper producción, y era mentira tres
     // veces: el banco se medía contra el dominio que redirige (y perdía el
