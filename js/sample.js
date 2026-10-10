@@ -12,7 +12,7 @@
 // Si la caché KV se escribe en el sitio equivocado, si el estado recurrente no
 // se arrastra o si las posiciones de RoPE se reinician, las dos formas divergen.
 //
-// Licencia: código propio y PRIVADO — no se publica. Sin dependencias externas.
+// Licencia: código propio, Apache-2.0 (ver SPDX arriba y LICENSE). Sin dependencias externas.
 
 // Muestreo sobre los logits ya en CPU. Se trabaja sobre el último token, que es
 // el único que interesa al generar.

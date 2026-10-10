@@ -16,7 +16,7 @@
 // GQA: 8 cabezas de query contra 2 de clave/valor, o sea 4 queries por cada KV.
 // La cabeza KV se elige con h / (H/KVH); no se replican los tensores.
 //
-// Licencia: código propio y PRIVADO — no se publica. Sin dependencias externas.
+// Licencia: código propio, Apache-2.0 (ver SPDX arriba y LICENSE). Sin dependencias externas.
 
 // Extrae un sub-tensor con paso: dst[t][h][d] = src[t][h·stride + offset + d].
 // Con stride = 2·headDim y offset = 0 saca Q; con offset = headDim, la puerta.
@@ -267,7 +267,7 @@ export function bloquesCombine(nKv) {
 // ── scores PARTIDO: la K leida UNA vez para las cabezas que la comparten ─────
 // El `attnScoresShader` de arriba pone un hilo por (cabeza, token, posicion) y
 // cada hilo recorre headDim. El paralelismo es de sobra —millones de hilos— y
-// el kernel va al 96 % del techo de lectura de la maquina: NO es ineficiente.
+// el kernel va al 96 % del techo de lectura: NO es ineficiente.
 // El problema es que lee SEIS VECES lo que necesita.
 //
 // La cuenta, con las formas del 27B: cada cabeza de consulta recorre por su

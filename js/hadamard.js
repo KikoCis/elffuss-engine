@@ -18,7 +18,7 @@
 // LANZA en vez de seguir. Es la única respuesta honesta: continuar significaría
 // devolver ruido con cara de respuesta.
 //
-// Licencia: código propio y PRIVADO — no se publica.
+// Licencia: código propio, Apache-2.0 (ver SPDX arriba y LICENSE).
 
 const CLAVE = 'prism.hadamard.';
 

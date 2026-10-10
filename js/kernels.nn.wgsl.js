@@ -21,7 +21,7 @@
 // análisis de uniformidad de WGSL exige que el recorrido de un bucle con
 // barreras sea constante de compilación, y con override no lo es.
 //
-// Licencia: código propio y PRIVADO — no se publica. Sin dependencias externas.
+// Licencia: código propio, Apache-2.0 (ver SPDX arriba y LICENSE). Sin dependencias externas.
 
 export const ROPE_NORM = 0;      // pares adyacentes:  x[2p], x[2p+1]
 export const ROPE_NEOX = 2;      // mitad-mitad:       x[p],  x[p + nDims/2]

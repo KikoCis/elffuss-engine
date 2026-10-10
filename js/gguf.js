@@ -18,7 +18,7 @@
 // que el fichero está roto, te da tensores en offsets absurdos y lo descubres
 // tres capas más arriba con basura en la salida.
 //
-// Licencia: código propio y PRIVADO — no se publica. Sin dependencias externas.
+// Licencia: código propio, Apache-2.0 (ver SPDX arriba y LICENSE). Sin dependencias externas.
 
 const MAGIC = [0x47, 0x47, 0x55, 0x46];            // 'G','G','U','F' en disco
 const VERSION_MAX = 3;                             // v1 rechazada, no hay ruta

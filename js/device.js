@@ -18,7 +18,7 @@
 // DEFECTO (buffer 256 MiB, binding 128 MiB) sin decir nada. Hay que recorrerlo
 // con for..in, que sí pasa por el prototipo. (gpuweb/gpuweb#4277)
 //
-// Licencia: código propio y PRIVADO — no se publica. Sin dependencias externas.
+// Licencia: código propio, Apache-2.0 (ver SPDX arriba y LICENSE). Sin dependencias externas.
 
 // Los dos únicos límites de clase «alignment», donde MEJOR es MENOR y el valor
 // debe ser potencia de dos. El resto son de clase «maximum» (mejor = mayor).
@@ -127,7 +127,7 @@ export async function requestDevice(opts = {}) {
     info: adapter.info || null,
     // Lo que te DIERON, nunca lo que pediste.
     hasF16: device.features.has('shader-f16'),
-    // 32 en Apple. 0 si no hay subgrupos o el tamaño no es fijo → el motor cae
+    // 32 en muchas GPU. 0 si no hay subgrupos o el tamaño no es fijo → el motor cae
     // a la reducción en árbol de siempre.
     subgroupSize: device.features.has('subgroups') ? sgSize : 0,
     hasTimestamp: device.features.has('timestamp-query'),

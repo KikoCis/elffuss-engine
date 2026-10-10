@@ -34,7 +34,7 @@
 // cubren los dos modelos enteros. Las rejillas de los i-quants viven en
 // `quant-tables.js` porque son parte del FORMATO, no de este código.
 //
-// Licencia: código propio y PRIVADO — no se publica. Sin dependencias externas.
+// Licencia: código propio, Apache-2.0 (ver SPDX arriba y LICENSE). Sin dependencias externas.
 
 export const Q8_BLOCK = 32;
 export const Q8_BLOCK_BYTES = 34;
@@ -893,7 +893,7 @@ export function matmulShader(type, workgroupSize = 64, tile = 1, subgroup = fals
   // acumuladores de los `workgroupSize` hilos con memoria compartida y una
   // barrera por paso (6 con 64 hilos). Si el workgroup es EXACTAMENTE un subgrupo
   // (ops.js lo garantiza fijando el ancho al tamaño de subgrupo del dispositivo,
-  // 32 en Apple), `subgroupAdd` hace esa misma suma en una instrucción, sin
+  // 32 en muchas GPU), `subgroupAdd` hace esa misma suma en una instrucción, sin
   // barreras ni memoria compartida. En el matvec del decode la reducción pesa,
   // así que esto va al grano. La numérica es la misma suma (mismo orden no está
   // garantizado a nivel de bit, pero es una suma de flotantes dentro de la misma

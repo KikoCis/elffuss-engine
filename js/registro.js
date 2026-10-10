@@ -13,12 +13,35 @@
 // estaba ahí— y el día que se borre para recuperar disco, la opción desaparece
 // del selector sin que nadie relacione las dos cosas. Una sola fuente.
 //
-// Licencia: código propio y PRIVADO — no se publica. Sin dependencias externas.
+// Licencia: código propio, Apache-2.0 (ver SPDX arriba y LICENSE). Sin dependencias externas.
 
 // Registro de modelos. `bytes` no es decorativo: se compara con el
 // content-length real y avisa si el fichero de origen ha cambiado, porque un
 // cambio de cuantización aguas arriba altera la salida sin previo aviso.
 export const MODELS = {
+  // MiniCPM5-2B, cuantizado a Q8_0 por nosotros desde el F16 de 4,7 GB.
+  //
+  // Entra sin tocar el motor porque su GGUF declara `general.architecture =
+  // llama`, que ya se lee. Es un transformer PURO: las 42 capas son de atención
+  // y las 42 pagan contexto, así que no tiene la ventaja del híbrido —en los
+  // Qwen la mayoría de los bloques son SSM con estado de tamaño fijo— y su
+  // caché KV por ficha es casi la del 27B teniendo diez veces menos parámetros.
+  //
+  // El fichero declara un contexto de 131.072 y aquí se pide 65.536. Lo que
+  // manda no es el modelo, es lo que cuesta su KV: a 131k en f16 no cabe en el
+  // presupuesto de una pestaña, y a 65k sí. Con la KV a 8 bits —no implementada
+  // todavía, hoy solo hay f16 y f32— el contexto declarado sería alcanzable.
+  //
+  // Q8_0 y no algo más pequeño a propósito: es uno de los dos únicos tipos que
+  // entran por el GEMM teselado del prefill. Un Q4_K cae al camino por filas y
+  // paga una relectura de los pesos POR CADA ficha del lote.
+  'minicpm5-2b': {
+    label: 'MiniCPM5 2B · Q8_0',
+    url: 'https://m1.elffuss.com/minicpm5-2b.q8',
+    bytes: 2679710688,
+    ctx: 65536,
+  },
+
   'qwen35-0.8b': {
     label: 'Qwen3.5 0.8B · Q8_0',
     url: 'https://huggingface.co/ggml-org/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q8_0.gguf',

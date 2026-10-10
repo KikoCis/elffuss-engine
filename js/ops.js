@@ -11,7 +11,7 @@
 // mal alineado no lanza, devuelve ceros, y una capa que devuelve ceros produce
 // texto plausible sin un solo error en consola.
 //
-// Licencia: código propio y PRIVADO — no se publica. Sin dependencias externas.
+// Licencia: código propio, Apache-2.0 (ver SPDX arriba y LICENSE). Sin dependencias externas.
 import { guard as rawGuard } from './device.js';
 
 // guard() cuesta una ida y vuelta al device timeline por llamada. Imprescindible

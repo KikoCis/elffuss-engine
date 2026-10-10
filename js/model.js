@@ -15,7 +15,7 @@
 //     antes de RoPE, RoPE parcial, GQA, y la puerta multiplicando la salida.
 // Los dos acaban igual: residual, norm, SwiGLU, residual.
 //
-// Licencia: código propio y PRIVADO — no se publica. Sin dependencias externas.
+// Licencia: código propio, Apache-2.0 (ver SPDX arriba y LICENSE). Sin dependencias externas.
 
 import { parseGGUF } from './gguf.js';
 import { leeRotacion } from './hadamard.js';
@@ -740,8 +740,15 @@ export function createSession(model, opts = {}) {
       // justamente para que salga en UNA pasada, y comparar 64 escalones contra
       // tres pasadas concatenadas no significa nada. Con `todosLosLogits`
       // tampoco, porque troceando solo sobreviven los del último lote.
+      // `onProgress(hechos, total)` se llama DESPUÉS de cada lote, que es justo
+      // después de esperar a que la GPU lo termine. Así lo que se reporta es
+      // trabajo HECHO y no encolado: una barra que avanza por encolado llega al
+      // 100 % y se queda ahí mientras la GPU sigue, que es peor que no tenerla.
+      const avisa = typeof opts.onProgress === 'function' ? opts.onProgress : null;
       if (opts.tap || opts.todosLosLogits || tokenIds.length <= LOTE) {
-        return await unaPasada(tokenIds, opts);
+        const r = await unaPasada(tokenIds, opts);
+        avisa?.(tokenIds.length, tokenIds.length);
+        return r;
       }
       let ultimo = null;
       for (let i = 0; i < tokenIds.length; i += LOTE) {
@@ -755,6 +762,7 @@ export function createSession(model, opts = {}) {
         // consumido. El resultado no era un error: era OTRO token (197 en vez
         // de 62), que es la peor forma de fallar porque sale texto plausible.
         await device.queue.onSubmittedWorkDone();
+        avisa?.(Math.min(i + LOTE, tokenIds.length), tokenIds.length);
       }
       // `tokens` se corrige al total: quien lo lea espera cuántos entraron, no
       // cuántos traía el último lote.

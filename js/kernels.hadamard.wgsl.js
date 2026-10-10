@@ -23,7 +23,7 @@
 //   · directo (antes de un matmul):   y = H(s ⊙ x)   signos PRIMERO
 //   · inverso (tras el embedding):    y = s ⊙ (H x)  signos DESPUÉS
 //
-// Licencia: código propio y PRIVADO — no se publica.
+// Licencia: código propio, Apache-2.0 (ver SPDX arriba y LICENSE).
 
 // `bloque` es el tamaño de la rotación (1024 en los modelos que la usan) y
 // `wg` cuántos hilos la procesan. Cada workgroup se queda un bloque entero en

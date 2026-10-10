@@ -23,7 +23,7 @@
 // El estado se guarda TRASPUESTO, state[j][i] con j = dimensión de value e
 // i = dimensión de key, para que cada hilo posea una fila contigua.
 //
-// Licencia: código propio y PRIVADO — no se publica. Sin dependencias externas.
+// Licencia: código propio, Apache-2.0 (ver SPDX arriba y LICENSE). Sin dependencias externas.
 
 export const SSM_HEAD_DIM = 128;      // head_k_dim = head_v_dim = ssm_d_state
 export const SSM_CONV_K = 4;          // qwen35.ssm.conv_kernel

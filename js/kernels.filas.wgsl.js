@@ -44,7 +44,7 @@
 // que tocarlo aquí: `test:quant` lo caza, porque valida el matmul contra la
 // referencia de CPU.
 //
-// Licencia: código propio y PRIVADO — no se publica. Sin dependencias externas.
+// Licencia: código propio, Apache-2.0 (ver SPDX arriba y LICENSE). Sin dependencias externas.
 
 import { HELPERS, AXIS, quantInfo } from './kernels.wgsl.js';
 

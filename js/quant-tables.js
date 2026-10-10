@@ -15,7 +15,7 @@
 // cual a un storage buffer: el byte j de la entrada e es el byte (j&3) de
 // tbl[2e + (j>>2)], que es exactamente lo que lee el C al castear a uint8_t*.
 //
-// El resto del motor es codigo propio y PRIVADO — no se publica.
+// El resto del motor es codigo propio, Apache-2.0 (ver LICENSE).
 
 export const IQ2XXS_GRID = new Uint32Array([
   0x08080808, 0x08080808, 0x0808082b, 0x08080808, 0x08081919, 0x08080808, 0x08082b08, 0x08080808,

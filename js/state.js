@@ -24,7 +24,7 @@
 // que declara el modelo harían falta páginas — 6 GiB de una sentada no se
 // reservan. Con contextos de conversación normales esto sirve tal cual.
 //
-// Licencia: código propio y PRIVADO — no se publica. Sin dependencias externas.
+// Licencia: código propio, Apache-2.0 (ver SPDX arriba y LICENSE). Sin dependencias externas.
 
 // Del modulo de shaders, que es texto puro: importar ops.js aqui arrastraria
 // las globales de WebGPU y state.js dejaria de poder inspeccionarse desde Node.

@@ -16,7 +16,7 @@
 //   · El `system` cambia en CADA turno porque lleva el contexto vivo dentro, así
 //     que no sirve como clave de caché salvo por su prefijo.
 //
-// Licencia: código propio y PRIVADO — no se publica. Sin dependencias externas.
+// Licencia: código propio, Apache-2.0 (ver SPDX arriba y LICENSE). Sin dependencias externas.
 
 import { requestDevice, readback } from './device.js';
 import { loadModel, createSession } from './model.js';
@@ -225,8 +225,8 @@ async function abrirPorRangos(url, onProgress, cachear = true) {
 
 // Handle por rangos sobre un modelo REPARTIDO entre varios hosts. Cada
 // fragmento vive en su propio subdominio, y eso no es capricho: la cuota de
-// almacenamiento del navegador es POR ORIGEN —medido: 3 GB en claw y 3 GB en
-// code y cada uno seguía contando solo los suyos—, así que repartir multiplica
+// almacenamiento del navegador es POR ORIGEN —unos pocos GB por origen, y
+// cada uno seguía contando solo los suyos—, así que repartir multiplica
 // el techo. Un modelo de 7,1 GiB no cabe fiable en un origen (se cortaba pasado
 // el 90 % en tres de cada cuatro intentos) y en dos entra holgado.
 //
@@ -717,7 +717,7 @@ function montarPrompt(system, mensajes, { conPensar = true } = {}) {
 // Cuántos tokens de contexto tiene el modelo elegido. La app lo consulta ANTES
 // de escribir el prompt para decidir qué le cabe decir: sin esto le mandaba las
 // instrucciones enteras al 27B —512 de contexto— y el primer mensaje moría con
-// la caché llena, después de 7,6 GB de descarga y seis minutos de espera.
+// la caché llena, después de descargar el modelo entero.
 // Se puede preguntar sin haber cargado nada: es una propiedad del registro.
 export function contextTokens() {
   return MODELS[clave]?.ctx || 0;
@@ -774,7 +774,23 @@ export function modeloEtiqueta() {
 /** Suscribe a las medidas. Avisa al acabar el prefill y en cada token. Devuelve el cancelador. */
 export function alMedir(cb) { oyentes.add(cb); return () => oyentes.delete(cb); }
 
-export async function chat(history, system, onToken = () => {}) {
+/**
+ * Un turno. `onToken` recibe cada ficha generada.
+ *
+ * `opts.onPrefill(hechos, total)` avisa del avance del PREFILL, que es la
+ * espera larga y hasta ahora invisible: con un prompt de arnés en el modelo
+ * grande son decenas de segundos en los que la pantalla no decía nada, y una
+ * espera sin señal se lee como «se ha colgado». Se llama por lote terminado en
+ * la GPU, no por lote encolado.
+ *
+ * ⚠️ El cuarto argumento acepta TAMBIÉN un AbortSignal: Elffuss Code lleva
+ * pasándolo en esa posición desde antes de que existiera este objeto de
+ * opciones, y el motor lo ignoraba en silencio. Romper esa llamada para
+ * estrenar un parámetro sería cambiar el contrato por comodidad mía.
+ */
+export async function chat(history, system, onToken = () => {}, opts = {}) {
+  const o = opts && typeof opts.aborted === 'boolean' ? { signal: opts } : (opts || {});
+  const onPrefill = typeof o.onPrefill === 'function' ? o.onPrefill : null;
   const tLlamada = ahora();
   // Antes que nada: si la GPU se cayó, decirlo con esas palabras. Si no, el
   // usuario ve «El modelo todavía no está cargado» después de haber esperado a
@@ -955,16 +971,22 @@ export async function chat(history, system, onToken = () => {}) {
       // estado avanza igual token a token (lo vigila `tests/lotes.browser.mjs`,
       // que compara troceado contra una sola pasada).
       const n = fichasSistema.length;
-      await sesion.forward(entradaCabeza.slice(0, n));
+      // El progreso se reporta sobre el TOTAL de la cabeza, no sobre cada
+      // tramo: al usuario le da igual que por dentro se parta para fotografiar.
+      const total = entradaCabeza.length;
+      await sesion.forward(entradaCabeza.slice(0, n),
+        onPrefill ? { onProgress: (h) => onPrefill(h, total) } : {});
       sesion.recycle();
       sesion.state.instantanea('sistema');
       sistemaFoto = fichasSistema;
       if (entradaCabeza.length > n) {
-        await sesion.forward(entradaCabeza.slice(n));
+        await sesion.forward(entradaCabeza.slice(n),
+          onPrefill ? { onProgress: (h) => onPrefill(n + h, total) } : {});
         sesion.recycle();
       }
     } else {
-      await sesion.forward(entradaCabeza);
+      await sesion.forward(entradaCabeza,
+        onPrefill ? { onProgress: (h) => onPrefill(h, entradaCabeza.length) } : {});
       sesion.recycle();
     }
   }

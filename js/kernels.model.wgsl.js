@@ -6,7 +6,7 @@
 // forward. Las tres mueven datos, y las tres tienen una forma de equivocarse que
 // no produce ningún error: escribir en el sitio de al lado.
 //
-// Licencia: código propio y PRIVADO — no se publica. Sin dependencias externas.
+// Licencia: código propio, Apache-2.0 (ver SPDX arriba y LICENSE). Sin dependencias externas.
 
 // El gather de embeddings vivía aquí, clavado a Q8_0 y con su propia copia de
 // los helpers de desempaquetado. Ahora está en `kernels.wgsl.js`, generado por
