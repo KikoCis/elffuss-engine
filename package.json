@@ -1,0 +1,11 @@
+{
+  "name": "elffuss-engine",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "description": "An LLM inference runtime for the browser: standard GGUF over HTTP, WebGPU, no dependencies.",
+  "repository": "github.com/KikoCis/elffuss-engine",
+  "scripts": {
+    "check": "for f in js/*.js; do node --check \"$f\" || exit 1; done"
+  }
+}
