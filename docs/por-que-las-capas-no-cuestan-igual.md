@@ -8,18 +8,23 @@ tensor, no solo el tipo) salen **5 firmas distintas entre las 65 capas**:
 
 | familia | capas | variantes |
 |---|---|---|
-| SSM (48) | `0,1,2,4,5,6` · `8,9,10,12,…` | **6 + 42** |
-| atención (16) | `3,7` · `11,15,19,…` | **2 + 14** |
-| cabeza MTP | `64` | 1 (no se ejecuta) |
+| SSM | 48 | **2** (un tramo corto al principio, el resto) |
+| atención | 16 | **2** (el mismo corte) |
+| cabeza MTP | 1 | 1 (no se ejecuta) |
 
-Las dos familias se parten **por el mismo sitio**: capas 0-7 contra capas 8 en
-adelante. Y la diferencia es **un solo tensor**:
+Qué índice de capa cae en qué variante es parte de cómo se empaqueta un modelo
+concreto, y no hace falta para lo que cuenta este documento: el efecto depende de
+que HAYA dos variantes en el tensor dominante, no de cuáles sean ni de dónde esté
+el corte.
 
-```
-ffn_down.weight  [17408, 5120]
-    capas 0-7   → Q2_K
-    capas 8+    → IQ1_S
-```
+Las dos familias se parten **por el mismo sitio**, y en el mismo punto, y la
+diferencia es **un solo tensor**: el `ffn_down.weight` de cada bloque, que en un
+tramo de capas viene con una cuantización y en el resto con otra.
+
+Qué cuantización le toca a qué tramo es parte de cómo se empaqueta un modelo
+concreto, y eso no se publica: no hace falta para entender el efecto, que es lo
+que cuenta este documento. El efecto depende solo de que haya **dos formatos
+distintos en el tensor dominante**, no de cuáles sean.
 
 Todo lo demás —tipo y forma— es idéntico entre las dos variantes.
 
@@ -40,24 +45,24 @@ gather por peso.
 Agrupando por variante dentro de la misma sesión (entre sesiones los absolutos
 varían ×1,45 y no se comparan):
 
-| variante de `ffn_down` | capas | ms por capa | dispersión dentro del grupo |
-|---|---|---|---|
-| **Q2_K** | 6 | **1556** | 8% |
-| **IQ1_S** | 42 | **1217** | 13% |
+| variante de `ffn_down` | coste por capa | dispersión dentro del grupo |
+|---|---|---|
+| la de más precisión | **×1,28** | 8% |
+| la de menos | ×1,00 (referencia) | 13% |
 
-**Q2_K cuesta un 28% MÁS que IQ1_S.** Y agrupar así convierte el 36% de
-dispersión en 8% y 13%: la premisa era el problema, no la medición.
+**La variante de más precisión cuesta un 28% MÁS.** Y agrupar así convierte el
+36% de dispersión en 8% y 13%: la premisa era el problema, no la medición.
 
-Es al revés de lo que yo predije. Q2_K es aritmética de bits pura e IQ1_S lleva
-una tabla de códigos con un gather por peso, así que esperaba IQ1_S más lenta.
+Es al revés de lo que yo predije. Una de las dos es aritmética de bits pura y la
+otra lleva una tabla de códigos con un gather por peso, así que esperaba la
+segunda más lenta.
 
-**No es ancho de banda**: Q2_K son 2,625 bits por peso contra 1,5625 de IQ1_S,
-o sea ~68% más bytes para ese tensor — pero esos bytes de más son una fracción
-despreciable del tiempo de la capa, dos órdenes de magnitud por debajo de la
-diferencia medida. Es coste de ALU al descuantizar.
+**No es ancho de banda**: la de más precisión son ~68% más bytes para ese tensor,
+pero a la velocidad de memoria eso explica menos del 1% de la diferencia medida.
+El resto es coste de ALU al descuantizar.
 
-**Consecuencia:** la política de precisión mixta que le da Q2_K a las ocho
-primeras capas «por calidad» las convierte a la vez en las más lentas del
+**Consecuencia:** la política de precisión mixta que le da el formato más preciso
+a un tramo de capas «por calidad» las convierte a la vez en las más lentas del
 modelo. Vale en torno al **3,5% del prefill entero**. Pero **no es una palanca
 gratis**: cambiarlo cambia los pesos, la calidad y el tamaño del fichero — es
 una decisión de cuantización, no de código.

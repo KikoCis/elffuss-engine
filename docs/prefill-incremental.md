@@ -88,9 +88,9 @@ o deslizar ventana sobre la KV.
 ## Lo que pasa hoy
 
 `provider.js` llama a `sesion.state.reset()` en CADA turno, así que cada turno
-vuelve a procesar la conversación entera desde el token cero. El turno 5 vuelve
-a pagar todo lo que ya calcularon los turnos 1 a 4: el coste crece con la
-conversación, no con lo que acabas de escribir.
+vuelve a procesar la conversación entera desde el token cero, a ~163 ms por
+token de prompt. El turno 5 vuelve a pagar todo lo que ya calcularon los turnos
+1 a 4.
 
 El comentario que justifica ese reset dice que el `system` cambia en cada
 llamada porque lleva el contexto vivo dentro, así que el prefijo cacheado no

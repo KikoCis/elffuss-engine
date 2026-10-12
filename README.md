@@ -1,76 +1,132 @@
-# Elffuss Engine — an LLM runtime for the browser (WebGPU, GGUF)
+# Elffuss Engine — runtime de inferencia propio
 
-Loads a **standard GGUF over HTTP** and runs it in a tab on WebGPU. No server, no account, no
-native build step: the weights are read by range requests, the tensors stay on the GPU, and the
-tokens come out in the page that opened the model.
+Motor de inferencia LLM en el navegador (WebGPU) + empaquetador offline de pesos.
+Sustituye a `@litert-lm/core` en Elffuss Claw/Code.
 
-It is what Elffuss Claw and Elffuss Code use when you pick a model marked *motor propio*.
+> **El motor (`js/`) es Apache-2.0** y se publica en
+> `github.com/KikoCis/elffuss-engine`. El empaquetador de pesos y el compresor
+> NO viven en este repositorio y no se publican. Ver `LICENSE`. El plan y el
+> porqué están en `ENGINE-PLAN.md`.
+>
+> Este repositorio (Gitea) es donde se trabaja; el de GitHub es el espejo
+> publicado. Antes de empujar allí, comprobar que no sale nada que no deba:
+> rutas de disco, medidas absolutas de la máquina ni recetas de cuantización.
 
-```js
-import * as motor from './js/provider.js';
+## Qué vive aquí y qué no
 
-motor.models();                 // [{ id, label }] — the entries in js/registro.js
-motor.configure('qwen35-0.8b'); // pick one
+| | dónde | licencia |
+|---|---|---|
+| Motor WebGPU (`js/`) | este repo + GitHub público | Apache-2.0 |
+| Bancos (`tests/`) | este repo | Apache-2.0 |
+| Empaquetador / compresor | **fuera de este repo** | no se publica |
+| App Elffuss Claw (chat, agente, UI) | `../elffuss-claw`, GitHub público | Apache-2.0 |
 
-// Progress arrives as text, one line per stage: reading the index, then the
-// upload to the GPU with its percentage.
-await motor.load((paso) => console.log(paso));
+## Qué protege y qué no un repo de código de navegador
 
-motor.setSampling({ temperature: 0.7, maxTokens: 256 });
+El `.js` que se sirve al navegador lo lee cualquiera con las devtools abiertas:
+eso es física del medio, no una decisión de este repo. Pretender que el motor
+era cerrado mientras se servía en tres sitios públicos era una postura que el
+medio no sostiene, y por eso `js/` es Apache-2.0.
+Lo que sí queda fuera del alcance de cualquiera es el empaquetador (corre en
+nuestra máquina, no viaja al cliente), y ahí es donde conviene que esté el
+trabajo que no se quiere regalar: la receta de cuantización y la calibración.
 
-const texto = await motor.chat(
-  [{ role: 'user', content: 'Hola, ¿qué tal?' }],   // the conversation so far
-  'You are a concise assistant.',                   // system prompt
-  (trozo) => document.body.append(trozo),           // called once per token
-);
+## Cómo se enchufa en la app pública
+
+El motor **no se commitea** en `elffuss-claw`. Se copia al árbol de trabajo
+local y de ahí sale por rsync en el deploy, igual que ya se hace con los pesos
+de `web/models/`:
+
+```bash
+./sync-to-claw.sh                  # js/ → ../elffuss-claw/web/js/engine/  (gitignorado allí)
+./sync-to-claw.sh ../elffuss-code  # y a code.elffuss, que ofrece los mismos modelos
 ```
 
-`chat()` resolves with the whole answer; the callback is there to paint it as it comes out.
-Call `motor.unload()` to give the GPU memory back.
+## Estructura
 
-The host serving the weights must answer **range requests** and send `Access-Control-Allow-Origin`.
-Hugging Face does both, so any public GGUF works as a URL.
+```
+js/       módulos del runtime (ES modules vanilla, sin deps ni bundler)
+          · registro.js — qué modelos hay, dónde viven y `disponible(id)`.
+            Va SEPARADO de provider.js porque la app necesita sondear
+            disponibilidad sin bajarse el motor entero, y porque tener las
+            URLs en dos sitios ya dejó al selector mirando un fichero muerto.
+rust/     empaquetador/compresor offline (CLI, nunca viaja al navegador)
+tests/    tests de Node puro (parser, layouts) — sin GPU ni DOM
+ref/      volcados de verdad de referencia contra los que asertan los tests
+```
 
-## What it does
+## Verificación
 
-- **GGUF straight from the network** (`js/gguf.js`): parses the header and the tensor table, then
-  reads the weights in **contiguous spans** — one request pulls many tensors at once and they are
-  split up afterwards. Nothing is loaded whole into RAM, which is what lets a model larger than the
-  tab's memory budget run at all. Reading tensor by tensor also works, and it is much slower: the
-  cost of a weight read is dominated by the round trip, not by its size.
-- **Quantised weights on the GPU** (`js/quant-tables.js`, `js/kernels.*.wgsl.js`): the k-quant and
-  i-quant blocks are dequantised inside the shader, so the GPU stores the compressed tensor.
-- **Hybrid models**: attention and SSM layers (`kernels.attn`, `kernels.ssm`), which is what a
-  Qwen3.x hybrid needs — most of its blocks keep a fixed-size state instead of a growing KV cache.
-- **Long dispatches are split on purpose** (`js/model.js`): a single long GPU dispatch starves the
-  system compositor, and every OS has a watchdog that kills the graphics session when the screen
-  stops repainting. The engine yields between batches.
-- **Device budget** (`js/device.js`): buffer limits and the practical ceiling per platform, so a
-  model that cannot fit is refused early instead of failing halfway.
-- **A model that big gets one tab** (`js/provider.js`): past a size threshold the engine takes a
-  cross-tab lock *before* fetching anything, so a second tab is told no immediately instead of
-  downloading several gigabytes only to be refused — and instead of two copies fighting over the
-  same GPU while it happens.
-- **The prompt is not re-read every turn** (`js/provider.js`, `js/state.js`): the recurrent state is
-  snapshotted so a turn whose prompt starts with the tokens already ingested continues instead of
-  starting over. There are two rescue levels, because the strict-prefix case almost never holds once
-  an agent injects live state into the prompt: the engine also keeps a snapshot taken right after the
-  system block, so a turn that diverges mid-prompt still skips the instructions instead of
-  reprocessing them. Reuse is token-exact and falls back to a full restart on any divergence — the
-  output is identical either way, which is what the tests assert.
+```bash
+npm run check                # sintaxis de todo
+npm test                     # parser GGUF: fixture + modelos reales de disco
+npm run test:quant-cpu       # los 8 tipos, referencia de CPU vs llama.cpp (sin GPU)
+npm run test:quant           # los 8 tipos en la GPU: dequant, matmul y gather
+npm run test:tiny            # forward completo con seis tipos MEZCLADOS
+npm run test:gpu             # ... y el resto, con --model si se tiene el fichero
+```
 
-## What is not here
+### Cómo se validan los tipos cuantizados
 
-The **offline packer/compressor** and everything about how weights are prepared or calibrated is not
-part of this repository and is not published.
+Ocho: `F32`, `F16`, `Q8_0` (el 0.8B) y los cinco del 27B — `IQ1_S`, `IQ2_XXS`,
+`Q2_K`, `Q4_K`, `Q5_K`. Los ocho comparten andamio de shader y se diferencian
+solo en el desempaquetado, así que lo que hay que probar es exactamente eso.
 
-## Status
+**La descuantización se exige BIT A BIT contra llama.cpp**, no con tolerancia.
+La verdad la genera `gguf-py` — el descodificador del propio llama.cpp — sobre
+bloques sintéticos deterministas (`ref/dump-quant-truth.py`). Es deliberado que
+la verdad venga de fuera: la referencia de CPU en JS y el shader WGSL los
+escribe la misma cabeza, y un layout mal entendido se cancelaría consigo mismo.
 
-Working, and slow by any native standard: a 27B at IQ1 answers in a tab, it does not feel instant.
-Dequantisation is checked **bit for bit** against llama.cpp for every quant type the engine
-implements, and the quantised path is checked against an unquantised twin of the same weights, so
-the numerics are not guesswork. Agreement with llama.cpp *node by node* through a whole block is
-still being chased down, and the discrepancy is in the test harness as much as anywhere — treat
-this as a runtime you can read and build on, not as a finished product.
+El único margen que se concede: en `Q2_K`/`Q4_K`/`Q5_K` el peso sale de `d·q − m`
+y IEEE permite a la GPU fundir la multiplicación y la resta en un FMA. Las dos
+formas son legales y dan bits distintos, así que la referencia calcula **las
+dos** y se acepta cualquiera. Sigue siendo igualdad exacta, contra el conjunto
+de resultados que el estándar permite.
 
-Apache-2.0.
+El **matmul** se compara contra una referencia en f64 (los `Number` de
+JavaScript son dobles) con NMSE y con el error máximo medido **contra la escala
+de la salida**, no contra cada elemento: una fila cuyos sumandos se cancelan da
+un resultado diminuto, y ahí un error absoluto normal se convierte en un
+relativo enorme que no dice nada del kernel.
+
+La referencia se calcula siempre con **los mismos pesos que usa la GPU**, ya
+descuantizados. Compararla contra los f32 de antes de cuantizar mediría el error
+de cuantización (~1e-3), que sepulta el del kernel y deja el test inútil.
+
+**`test:tiny` es el que responde la pregunta del 27B.** Fabrica en memoria un
+qwen35 de juguete (`tests/synth-gguf.mjs`) con la misma forma que el real y con
+los seis tipos repartidos entre sus tensores, y lo escribe DOS veces: cuantizado
+y en F32 con los pesos ya descuantizados. Los dos tienen que dar los mismos
+logits. Eso no comprueba que el modelo cargue, comprueba que el camino
+cuantizado *calcula lo mismo* hasta la salida — un tensor leído con el tipo
+equivocado sobrevive a «carga sin error», a esto no.
+
+Los tests de GPU corren **dentro de Chromium**, no en Node: los límites, las
+features y los bugs que importan son los del navegador. `tests/browser.mjs`
+sirve el repo por `http://127.0.0.1` (con soporte de `Range`, que es como el
+motor lee los pesos), abre Chromium y ejecuta el módulo de test en la página.
+Reutiliza el playwright de `../elffuss-claw/tests` — no se instala nada aquí; si
+no lo encuentra, se salta en voz alta. Se puede forzar con `PLAYWRIGHT_CORE=…`,
+`CHROMIUM_PATH=…`, `HEADED=1` y `VERBOSE=1`.
+
+**Dos trampas que el arnés cierra** (las dos hacen que parezca un fallo de GPU
+cuando no lo es):
+
+- `about:blank` **no es contexto seguro** → `navigator.gpu` sale `undefined`.
+  Por eso hay servidor y no un `setContent()`.
+- Con `--enable-unsafe-webgpu` y **sin** fijar el backend gráfico nativo,
+  Chromium devuelve un adaptador **SwiftShader**: CPU pura disfrazada de GPU. Funciona, pasa los
+  tests y falsea cualquier medición. El arnés aborta si detecta software.
+
+Los tests comparan contra una **verdad de referencia** sacada del lector de
+llama.cpp, no de nuestro parser — un test que compara el código consigo mismo no
+prueba nada. Para regenerarla (o añadir modelos):
+
+```bash
+PYTHONPATH=$HOME/llama.cpp/gguf-py OUT=ref/gguf-truth.json \
+  python3 ref/dump-truth.py <modelo.gguf> [más modelos…]
+```
+
+El volcado (`ref/*.json`) está gitignorado: pesa y se regenera. Si falta, los
+casos exhaustivos se saltan y lo dicen en voz alta.

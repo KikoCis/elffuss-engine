@@ -16,10 +16,18 @@
 //   · El `system` cambia en CADA turno porque lleva el contexto vivo dentro, así
 //     que no sirve como clave de caché salvo por su prefijo.
 //
+// Y uno opcional: `chat()` admite un cuarto argumento, `{ signal, onPrefill }`,
+// o la señal suelta (o un AbortController), que es como lo llamaban las apps
+// antes de que existiera ese objeto. Un turno parado RECHAZA con un AbortError
+// que trae en `.partial` lo que llegó a emitir, y `.porDescarga` a true si no
+// lo paró quien llamaba sino una descarga (`unload()` o `configure()` a otro
+// modelo); quien llame tiene que tratarlo como «parado» y no como «el modelo
+// falló». `abort()` para lo que haya en marcha.
+//
 // Licencia: código propio, Apache-2.0 (ver SPDX arriba y LICENSE). Sin dependencias externas.
 
 import { requestDevice, readback } from './device.js';
-import { loadModel, createSession } from './model.js';
+import { loadModel, createSession, errorParado } from './model.js';
 
 // Contextos a intentar, del pedido hacia abajo por mitades, con un suelo. El
 // suelo NO es cero a propósito: por debajo de 2048 el modelo no puede ni con su
@@ -85,6 +93,7 @@ let modelo = null, sesion = null, tk = null, gpu = null, muestreo = null;
 // sí lo lleve funciona sin tocar nada.
 let pensante = false;
 let cargando = null;
+let descargando = null;                    // la descarga en curso, si la hay: ver `unload`
 // Las fichas del bloque de sistema que describe la ranura 'sistema' de la
 // instantánea. `null` = no hay foto del sistema válida. Se guardan las FICHAS y
 // no un hash para poder comparar una por una: un hash igual con contenido
@@ -434,6 +443,11 @@ function conLatido(hacer, ms, queHacer) {
 }
 
 export async function load(onProgress = () => {}) {
+  // Una descarga a medias se espera ANTES de mirar `sesion`: `configure()`
+  // descarga sin esperar, y sin esto un `load()` justo detrás vería la sesión
+  // vieja todavía puesta, contestaría «ya está cargado» y la descarga la
+  // destruiría un instante después.
+  if (descargando) await descargando;
   if (sesion) return;                      // idempotente: nunca dos motores
   if (cargando) return cargando;           // dos llamadas a la vez: una carga
   cargando = (async () => {
@@ -490,7 +504,7 @@ export async function load(onProgress = () => {}) {
       }
 
       // Avisar ANTES de bajar, no después: el usuario que no tiene sitio se
-      // entera ahora y no tras media hora de barra de progreso.
+      // entera ahora y no al final de una descarga entera.
       const apretado = cachea(m) ? await faltaSitio(m.bytes) : null;
       if (apretado) {
         throw new Error(`${m.label} necesita unos ${GiB(apretado.necesita)} GiB y el navegador ` +
@@ -513,7 +527,7 @@ export async function load(onProgress = () => {}) {
       // La etiqueta cambia según de dónde salgan los pesos, y no es cosmética.
       // Sin caché, esta fase NO es «subir a la GPU»: es bajar los gigabytes y
       // subirlos según llegan, y el tiempo se lo lleva casi todo la red. Decir
-      // «subiendo a la GPU» mientras alguien espera minutos a que baje un modelo
+      // «subiendo a la GPU» mientras alguien espera a que baje el modelo entero
       // hace que parezca colgado en el paso equivocado.
       const etiqueta = donde.startsWith('red')
         ? 'Descargando el modelo y subiéndolo a la GPU'
@@ -614,7 +628,23 @@ function mensajeHumano(e, m) {
   return `No se pudo cargar ${m.label}: ${t}`;
 }
 
+// Descargar empieza por PARAR. Antes se destruían los buffers con un turno en
+// marcha —el vigilante de RAM llama aquí justo cuando la memoria va justa, que
+// es cuando más probable es que haya uno— y el forward seguía grabando sobre
+// memoria ya liberada. Ahora se para el turno, se espera a que suelte el motor
+// y solo entonces se destruye.
+//
+// Se guarda la promesa en `descargando` para que `load()` y los turnos que
+// lleguen mientras tanto la esperen en vez de ver la sesión vieja.
 export async function unload() {
+  if (!descargando) descargando = descargar().finally(() => { descargando = null; });
+  return descargando;
+}
+
+async function descargar() {
+  // Con su propio motivo: el turno parado así no lo pidió quien lo lanzó, y
+  // el error tiene que decirlo (ver «POR QUÉ se paró»).
+  try { await pararTodos('descarga'); } catch { /* parar nunca impide descargar */ }
   pensante = false;
   try { sesion?.destroy?.(); } catch { /* mejor esfuerzo */ }
   try {
@@ -737,10 +767,16 @@ export function contextTokens() {
 // `reusados` no es decoración: con la caché de prefijo funcionando, los tokens
 // PROCESADOS son muchos menos que los del prompt, y sin ese dato el tok/s de
 // prefill parece un milagro o una mentira según cómo se mire.
+//
+// La medida NACE cuando el turno coge el motor con un modelo cargado y se
+// CIERRA en todas sus salidas, con `enCurso` a false: si acaba bien; si lo
+// paran, con `abortado`; si falla, con el mensaje en `error`. Un turno parado
+// en la cola no llegó a coger el motor y no tiene medida: `ultimaMedida()`
+// sigue siendo la del turno de delante, que puede estar todavía en marcha.
 const ahora = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 let medida = null;
 const oyentes = new Set();
-const avisar = () => { for (const cb of oyentes) { try { cb(medida); } catch { /* un oyente roto no tumba la generación */ } } };
+const avisar = (m = medida) => { for (const cb of oyentes) { try { cb(m); } catch { /* un oyente roto no tumba la generación */ } } };
 
 /** La medida del último turno (o el turno en curso). Null si no ha habido ninguno. */
 export function ultimaMedida() { return medida; }
@@ -771,32 +807,229 @@ export function modeloEtiqueta() {
   return m ? (m.label || clave) : clave;
 }
 
-/** Suscribe a las medidas. Avisa al acabar el prefill y en cada token. Devuelve el cancelador. */
+/** Suscribe a las medidas. Avisa al acabar el prefill, en cada token y al cerrar el turno, acabe como acabe. Devuelve el cancelador. */
 export function alMedir(cb) { oyentes.add(cb); return () => oyentes.delete(cb); }
+
+// ── TURNOS DE UNO EN UNO, Y PARAR ───────────────────────────────────────────
+// El motor tiene UN estado: la caché KV, el recurrente del SSM y las fotos del
+// prefijo. Dos turnos a la vez lo pisarían el uno al otro sin dar un error —
+// cada uno avanzando nPast sobre lo que escribió el otro—, así que `chat()` se
+// pone a la cola detrás del turno anterior y solo empieza cuando ese suelta el
+// motor. Dos llamadas a la vez dan lo mismo que dos seguidas.
+//
+// Parar es un AbortSignal, el mismo contrato que ya usan los otros proveedores
+// de las apps: `opts.signal` en el cuarto argumento de `chat()`, o la señal
+// suelta en esa misma posición. Un turno parado RECHAZA con un AbortError que
+// lleva en `.partial` el texto limpio que llegó a emitir, y después de notarlo
+// ya no llama a `onToken` ni a `onPrefill` ni una vez más.
+//
+// ⚠️ Y quien deja de esperar un turno tiene que PARARLO, con su señal o con
+// `abort()`. Abandonar la promesa no suelta el motor: el turno sigue hasta el
+// final y los siguientes se ponen a la cola detrás de él. Un plazo que le gana
+// la carrera a `chat()` sin parar el turno no ahorra nada, lo convierte en un
+// atasco: cada llamada siguiente gasta su propio plazo esperando en la cola.
+//
+// `ultimoTurno` se resuelve cuando el último turno encolado ha soltado el
+// motor (o ha renunciado a cogerlo); nunca se rechaza. `turnosVivos` son los
+// controladores de los turnos encolados o en marcha: es lo que corta `abort()`.
+let ultimoTurno = Promise.resolve();
+const turnosVivos = new Set();
+
+// POR QUÉ se paró. Quien llama tiene que poder distinguir su propio «para» del
+// que no pidió: `unload()` —el vigilante de RAM, el botón de liberar el modelo—
+// y `configure()` a otro modelo también paran el turno en marcha, y enseñarle
+// al usuario «parado a petición» cuando no ha pedido nada es mentirle. El
+// motivo va en el texto del error y en `.porDescarga`, que es lo que se mira
+// sin leer texto. Gana la PRIMERA causa: un turno ya parado no cambia de motivo.
+const PARADO_POR = {
+  peticion: 'turno parado a petición',
+  descarga: 'turno parado: se ha descargado el modelo',
+};
+const causaDe = new WeakMap();             // señal de un turno → por qué se paró
+function parar(ctl, causa) {
+  if (ctl.signal.aborted) return;
+  causaDe.set(ctl.signal, causa);
+  ctl.abort();
+}
+function errorDeParada(senal, partial) {
+  const causa = causaDe.get(senal) || 'peticion';
+  const e = errorParado(PARADO_POR[causa]);
+  e.partial = partial;
+  e.porDescarga = causa === 'descarga';
+  return e;
+}
+
+// La señal, o algo que la lleve dentro (un AbortController). Se reconoce por la
+// forma y no por la clase: una señal de otro reino —un iframe, un worker— no es
+// `instanceof` del AbortSignal de esta página y aun así es una señal
+// perfectamente válida.
+function senalDe(x) {
+  if (!x || typeof x !== 'object') return null;
+  if (typeof x.aborted === 'boolean') return x;
+  if (x.signal && typeof x.signal.aborted === 'boolean') return x.signal;
+  return null;
+}
+
+// Espera a que el turno de delante suelte el motor, salvo que paren a este
+// antes: entonces rechaza en el acto, sin esperar a nadie.
+function esperarTurno(antes, senal) {
+  return new Promise((si, no) => {
+    if (senal.aborted) { no(errorParado()); return; }
+    const fuera = () => no(errorParado());
+    senal.addEventListener('abort', fuera, { once: true });
+    antes.then(() => { senal.removeEventListener('abort', fuera); si(); });
+  });
+}
+
+/**
+ * Para el turno en marcha y los que esperan en la cola. Resuelve cuando el
+ * motor está en reposo: ningún turno de los que había lo está usando, la GPU ha
+ * terminado lo que tenía y el estado es coherente para el siguiente turno.
+ */
+export async function abort() {
+  await pararTodos('peticion');
+}
+
+// Lo de `abort()`, con el motivo dicho: `descargar()` para por 'descarga'.
+async function pararTodos(causa) {
+  const hasta = ultimoTurno;
+  for (const c of turnosVivos) { try { parar(c, causa); } catch { /* — */ } }
+  await hasta;
+}
 
 /**
  * Un turno. `onToken` recibe cada ficha generada.
  *
  * `opts.onPrefill(hechos, total)` avisa del avance del PREFILL, que es la
  * espera larga y hasta ahora invisible: con un prompt de arnés en el modelo
- * grande son decenas de segundos en los que la pantalla no decía nada, y una
- * espera sin señal se lee como «se ha colgado». Se llama por lote terminado en
- * la GPU, no por lote encolado.
+ * grande es la espera más larga del turno y la pantalla no decía nada en todo
+ * ese rato, y una espera sin señal se lee como «se ha colgado». Se llama por
+ * lote terminado en la GPU, no por lote encolado.
  *
- * ⚠️ El cuarto argumento acepta TAMBIÉN un AbortSignal: Elffuss Code lleva
- * pasándolo en esa posición desde antes de que existiera este objeto de
- * opciones, y el motor lo ignoraba en silencio. Romper esa llamada para
- * estrenar un parámetro sería cambiar el contrato por comodidad mía.
+ * `opts.signal` para el turno: ver «TURNOS DE UNO EN UNO, Y PARAR».
+ *
+ * ⚠️ El cuarto argumento acepta TAMBIÉN un AbortSignal suelto, o un
+ * AbortController: Elffuss Code lleva pasando la señal en esa posición desde
+ * antes de que existiera este objeto de opciones, y el motor la ignoraba en
+ * silencio. Romper esa llamada para estrenar un parámetro sería cambiar el
+ * contrato por comodidad mía.
  */
 export async function chat(history, system, onToken = () => {}, opts = {}) {
   const o = opts && typeof opts.aborted === 'boolean' ? { signal: opts } : (opts || {});
   const onPrefill = typeof o.onPrefill === 'function' ? o.onPrefill : null;
   const tLlamada = ahora();
+  const externa = senalDe(o.signal);
+  const ctl = new AbortController();
+  const reenviar = () => parar(ctl, 'peticion');
+  if (externa?.aborted) parar(ctl, 'peticion');
+  else externa?.addEventListener?.('abort', reenviar, { once: true });
+  turnosVivos.add(ctl);
+  const antes = ultimoTurno;
+  let soltar;
+  ultimoTurno = new Promise((r) => { soltar = r; });
+  try {
+    try {
+      await esperarTurno(antes, ctl.signal);
+    } catch {
+      // Parado mientras esperaba: no llegó a tocar el motor. Su hueco se suelta
+      // cuando lo suelte el de delante; soltarlo ya dejaría colarse al de detrás
+      // mientras el de delante todavía está trabajando.
+      antes.then(soltar);
+      soltar = null;
+      const parado = errorDeParada(ctl.signal, '');
+      console.log('[engine] turno PARADO en la cola: no llegó a empezar' +
+        (parado.porDescarga ? ' · por descarga' : ''));
+      throw parado;
+    }
+    return await turnoParable(history, system, onToken, { senal: ctl.signal, onPrefill, tLlamada });
+  } finally {
+    turnosVivos.delete(ctl);
+    externa?.removeEventListener?.('abort', reenviar);
+    soltar?.();
+  }
+}
+
+// El turno con el motor ya para él solo. Si lo paran, deja todo listo para el
+// siguiente ANTES de soltar el motor: la GPU en reposo, lo prestado devuelto al
+// pozo y la medida cerrada como parada. El estado no hace falta tocarlo: todo
+// turno empieza con `restaura()` o con `reset()`, las fotos que el turno va a
+// pisar se invalidan antes de su primer forward, y cada foto se vuelve a apuntar
+// solo con lo suyo ingerido entero (ver «LO QUE EL TURNO VA A PISAR»). Así un
+// turno parado a medias nunca deja una foto que describa algo que no pasó.
+async function turnoParable(history, system, onToken, opciones) {
+  const { senal } = opciones;
+  // `cerrar` lo pone `turno()` en cuanto nace la medida: es lo que la cierra
+  // desde aquí cuando el turno sale por un error.
+  const hecho = { fase: 'entrada', texto: '', prompt: 0, salida: null, cerrar: null };
+  try {
+    return await turno(history, system, onToken, opciones, hecho);
+  } catch (e) {
+    // Solo es «parado» si lo pidieron Y el error es el de parar. Un fallo de
+    // verdad que coincida con un «para» se enseña como el fallo que es.
+    if (!(senal.aborted && e?.name === 'AbortError')) {
+      // Un fallo también cierra la medida, con el fallo dentro: si no, se
+      // quedaría «en curso» para siempre, esperando tokens de un turno que ya
+      // no existe.
+      hecho.cerrar?.({ error: String(e?.message || e) });
+      throw e;
+    }
+    try { await gpu?.device?.queue?.onSubmittedWorkDone?.(); } catch { /* sin GPU, nada que esperar */ }
+    try { sesion?.recycle(); } catch { /* mejor esfuerzo */ }
+    hecho.cerrar?.({ abortado: true });
+    const parado = errorDeParada(senal, limpiarRazonamiento(hecho.texto));
+    console.log(`[engine] turno PARADO en ${hecho.fase} · prompt ${hecho.prompt} tokens · ` +
+      `nPast ${sesion?.state?.nPast ?? '-'} · salieron ${hecho.salida ? hecho.salida.length : 0} tokens · ` +
+      `devuelto ${parado.partial.length} car.` + (parado.porDescarga ? ' · por descarga' : ''));
+    throw parado;
+  }
+}
+
+async function turno(history, system, onToken, { senal, onPrefill, tLlamada }, hecho) {
+  // Un turno parado antes de empezar no toca nada: ni el estado ni la foto.
+  if (senal.aborted) throw errorParado();
+  // Uno que llegó con una descarga en marcha la espera: cuando le toque, el
+  // modelo ya no estará y lo dirá con el error de siempre. Se espera DESPUÉS de
+  // mirar la señal y no antes: la descarga para a todos los turnos que había
+  // antes que ella y espera a que suelten el motor, así que uno de esos
+  // esperándola a ella se quedaría colgado para siempre.
+  if (descargando) {
+    await descargando;
+    if (senal.aborted) throw errorParado();
+  }
+  hecho.fase = 'preparación';
   // Antes que nada: si la GPU se cayó, decirlo con esas palabras. Si no, el
   // usuario ve «El modelo todavía no está cargado» después de haber esperado a
   // que cargara, que es la peor manera de contar lo que ha pasado.
   if (perdida) throw new Error(perdida + ' Vuelve a elegirlo en el selector para cargarlo otra vez.');
   if (!sesion) throw new Error('El modelo todavía no está cargado.');
+
+  // ── LA MEDIDA NACE AQUÍ, con el turno ya en el motor ───────────────────────
+  // Antes nacía con la cabeza ya ingerida, y eso tenía dos agujeros: un turno
+  // parado en la preparación o en el prefill no llegaba a tenerla, así que
+  // `ultimaMedida()` seguía dando la del turno ANTERIOR como si fuera la suya y
+  // nadie recibía aviso; y uno que fallaba a media respuesta se quedaba «en
+  // curso» para siempre. Ahora se cierra en todas las salidas: al final de esta
+  // función si acaba bien, y en `turnoParable` si lo paran o falla. Los campos
+  // que aún no se saben salen a cero y se rellenan según se conocen.
+  const m = medida = {
+    promptTokens: 0, procesados: 0, reusados: 0,
+    prefillMs: 0, prefillTokS: 0,
+    genTokens: 0, genMs: 0, genTokS: 0,
+    ttftMs: 0, totalMs: 0, enCurso: true, abortado: false, error: null,
+  };
+  let msForward = 0, msReadback = 0, msSample = 0, msDecode = 0;
+  hecho.cerrar = ({ abortado = false, error = null } = {}) => {
+    if (!m.enCurso) return;
+    // El reparto del bucle, para que «va lento» tenga una causa y no cuatro
+    // candidatas indistinguibles. Son acumulados de TODO el turno, prefill
+    // incluido: el primer `forward` es el prompt entero.
+    m.reparto = { forwardMs: msForward, readbackMs: msReadback, sampleMs: msSample, decodeMs: msDecode };
+    m.totalMs = ahora() - tLlamada;
+    m.enCurso = false;
+    m.abortado = abortado;
+    m.error = error;
+    avisar(m);
+  };
 
   const ctxLen = sesion.state.ctxLen;
   // Sitio reservado para contestar. Un prompt que ocupa el contexto ENTERO
@@ -813,6 +1046,7 @@ export async function chat(history, system, onToken = () => {}, opts = {}) {
       `${ctxLen} de contexto: elige un modelo con más contexto para trabajar con herramientas.`);
   }
   const mensajes = await empaquetar(history, ctxLen - sistema - RESERVA);
+  if (senal.aborted) throw errorParado();
   // El prompt se arma en DOS PIEZAS. `cabeza` es todo hasta el punto donde se
   // fotografía el estado; `cola` es lo que se alimenta después y queda FUERA de
   // la foto. Con modelo pensante la cola es el bloque `<think>`; sin él, el
@@ -842,6 +1076,8 @@ export async function chat(history, system, onToken = () => {}, opts = {}) {
     throw new Error(`tu mensaje ocupa más de lo que cabe en este modelo ` +
       `(${ids.length} tokens sobre ${ctxLen}): prueba con uno más corto.`);
   }
+  hecho.prompt = ids.length;
+  m.promptTokens = ids.length;
 
   // ── REUTILIZACIÓN DE PREFIJO ───────────────────────────────────────────────
   // Antes esto era `sesion.state.reset()` a secas, y el comentario lo justificaba
@@ -849,7 +1085,7 @@ export async function chat(history, system, onToken = () => {}, opts = {}) {
   // dentro. Es cierto EN GENERAL y no lo es para los modelos lentos: los que
   // declaran `prefiereCompacto` reciben un prompt sin contexto vivo, estable
   // entre turnos. Reiniciando siempre, el turno 5 vuelve a pagar entero lo que ya
-  // calcularon los turnos 1 a 4 — y en este modelo eso son minutos.
+  // calcularon los turnos 1 a 4, y lo que se repaga crece con cada turno.
   //
   // La condición para reutilizar es la más estricta posible: que los tokens de
   // este turno EMPIECEN EXACTAMENTE por los que el estado ya ingirió. Entonces
@@ -929,13 +1165,46 @@ export async function chat(history, system, onToken = () => {}, opts = {}) {
     nivel = 'sistema';
     motivo += ' → rescatado por el prefijo del sistema';
   }
-  if (!reusa) { consumidos = null; sesion.state.reset(); }
+  // ── LO QUE EL TURNO VA A PISAR DEJA DE VALER, Y ANTES DE PISARLO ─────────
+  // Una foto guarda el estado recurrente en un punto, pero la caché KV de las
+  // posiciones anteriores a ese punto vive FUERA de la foto: restaurarla da por
+  // hecho que nadie las ha reescrito. Un turno que reprocesa desde antes de una
+  // foto las reescribe, y si se para —o falla— a medias, esa foto sigue
+  // pareciendo válida sobre una caché que ya es de otra conversación.
+  // Restaurarla después no da ningún error: da texto plausible sacado de una
+  // mezcla de las dos.
+  //
+  // Así que lo que el turno va a pisar se invalida AQUÍ, antes del primer
+  // forward, y cada foto se vuelve a apuntar solo cuando lo suyo está ingerido
+  // entero: la del sistema tras su bloque, la del turno tras la cabeza.
+  //   · reinicio: se reprocesa desde la posición 0, así que no sobrevive
+  //     ninguna foto; `reset()` ya invalida la del turno, y la del sistema se
+  //     invalida aquí y se vuelve a tomar en este mismo turno si se puede;
+  //   · nivel 'sistema': se reprocesa desde el fin del bloque de sistema, así
+  //     que la foto del TURNO, que es más larga, y `consumidos` dejan de valer;
+  //   · nivel 'turno': se escribe detrás de las dos fotos y no se pisa nada.
+  if (!reusa) {
+    consumidos = null;
+    sesion.state.reset();
+    sistemaFoto = null;
+    sesion.state.olvidaInstantanea('sistema');
+  } else if (nivel === 'sistema') {
+    consumidos = null;
+    sesion.state.olvidaInstantanea('turno');
+  }
 
-  // ¿Hay que (re)tomar la foto del sistema? Solo si no vale la que hay, y solo
-  // se puede si el bloque es prefijo exacto de lo que se va a procesar ahora.
-  const tomarFotoSistema = quiereReuso && sistemaEsPrefijo && !reusa &&
-    (!mismoSistema || !sesion.state.tieneInstantanea('sistema'));
+  // ¿Hay que tomar la foto del sistema? Tras un reinicio no queda ninguna —se
+  // acaba de invalidar—, así que se toma siempre que el bloque sea prefijo
+  // exacto de lo que se va a procesar ahora.
+  const tomarFotoSistema = quiereReuso && sistemaEsPrefijo && !reusa;
   const entradaCabeza = reusa ? cabeza.slice(yaIngeridos.length) : cabeza;
+  // Lo PROCESADO de verdad son las dos fases: la cabeza que no se reutilizó más
+  // la cola. Con la caché de prefijo funcionando esto es mucho menor que
+  // `promptTokens`, y por eso se informan los dos: sin `reusados`, un prefill
+  // que va «diez veces más rápido» parece un milagro o un error de medida.
+  const procesados = entradaCabeza.length + cola.length;
+  m.procesados = procesados;
+  m.reusados = yaIngeridos ? yaIngeridos.length : 0;
   if (quiereReuso) {
     // El NIVEL va en la traza, y no es decoración: «reutilizados 24» puede ser
     // el prefijo completo de una conversación corta o el rescate del bloque de
@@ -953,6 +1222,7 @@ export async function chat(history, system, onToken = () => {}, opts = {}) {
 
   const vocab = tk.vocabSize;
   const salida = [];
+  hecho.salida = salida;
   let texto = '';
   // El reloj del prefill arranca AQUÍ, antes de la fase 1, y no en el bucle.
   //
@@ -964,7 +1234,21 @@ export async function chat(history, system, onToken = () => {}, opts = {}) {
   // escondía en el hueco entre la llamada y el bucle. Se veía porque el tiempo
   // hasta la primera letra era decenas de veces el «prefill».
   const tPrefillIni = ahora();
+  // ── FASE 1: alimentar hasta el punto de la foto ────────────────────────────
+  // Con la señal dentro, y en los DOS tramos cuando se parte para fotografiar el
+  // sistema: un prompt largo son muchos lotes y muchas capas, y parar tiene que
+  // poder entrar entre ellos en vez de esperar al final.
+  hecho.fase = 'prefill';
   if (entradaCabeza.length) {
+    // El progreso, solo si alguien lo escucha; `desde` es lo ya hecho en un
+    // tramo anterior, porque se reporta sobre el TOTAL de la cabeza. Y nada
+    // de progreso con la señal ya dada: `forward` avisa de cada lote
+    // terminado, también del que acaba justo cuando llega el «para» y del
+    // último, que no mira la señal; pero el contrato de `chat()` es que tras
+    // notar el «para» no se llama más a `onPrefill`, así que se filtra aquí.
+    const opciones = (desde, total) => (onPrefill
+      ? { signal: senal, onProgress: (h) => { if (!senal.aborted) onPrefill(desde + h, total); } }
+      : { signal: senal });
     if (tomarFotoSistema) {
       // Se parte el forward de la cabeza para poder fotografiar EXACTAMENTE
       // después del bloque de sistema. Partirlo no cambia la numérica: el
@@ -974,19 +1258,16 @@ export async function chat(history, system, onToken = () => {}, opts = {}) {
       // El progreso se reporta sobre el TOTAL de la cabeza, no sobre cada
       // tramo: al usuario le da igual que por dentro se parta para fotografiar.
       const total = entradaCabeza.length;
-      await sesion.forward(entradaCabeza.slice(0, n),
-        onPrefill ? { onProgress: (h) => onPrefill(h, total) } : {});
+      await sesion.forward(entradaCabeza.slice(0, n), opciones(0, total));
       sesion.recycle();
       sesion.state.instantanea('sistema');
       sistemaFoto = fichasSistema;
       if (entradaCabeza.length > n) {
-        await sesion.forward(entradaCabeza.slice(n),
-          onPrefill ? { onProgress: (h) => onPrefill(n + h, total) } : {});
+        await sesion.forward(entradaCabeza.slice(n), opciones(n, total));
         sesion.recycle();
       }
     } else {
-      await sesion.forward(entradaCabeza,
-        onPrefill ? { onProgress: (h) => onPrefill(h, entradaCabeza.length) } : {});
+      await sesion.forward(entradaCabeza, opciones(0, entradaCabeza.length));
       sesion.recycle();
     }
   }
@@ -1000,6 +1281,11 @@ export async function chat(history, system, onToken = () => {}, opts = {}) {
   // había que invalidar por si acaso.
   sesion.state.instantanea('turno');
   consumidos = cabeza;
+  // Se mira DESPUÉS de la foto y de `consumidos`, no antes: la cabeza ya está
+  // ingerida entera, y apuntarlo deja que el turno siguiente la reutilice
+  // aunque este se pare aquí mismo.
+  if (senal.aborted) throw errorParado();
+  hecho.fase = 'generación';
 
   // ── FASE 2: la cola, que entra en el estado pero NO en la foto ─────────────
   let entrada = cola;
@@ -1018,21 +1304,9 @@ export async function chat(history, system, onToken = () => {}, opts = {}) {
   // ellos hay que adivinar. Cuesta una línea de consola por respuesta.
   console.log(`[engine] turno: prompt ${ids.length} tokens · contexto ${ctxLen} · ` +
     `tope ${tope} · muestreo ${muestreo ? JSON.stringify(muestreo) : 'voraz (por defecto)'}`);
-  // El reloj del turno arranca aquí, con el prompt ya tokenizado: lo que mide es
-  // el trabajo del modelo. `tLlamada` guarda la entrada a `chat()` para poder dar
-  // además el tiempo hasta la primera letra TAL COMO LO ESPERA UN HUMANO, que
-  // incluye la tokenización y el montaje del prompt.
-  // Lo PROCESADO de verdad son las dos fases: la cabeza que no se reutilizó más
-  // la cola. Con la caché de prefijo funcionando esto es mucho menor que
-  // `promptTokens`, y por eso se informan los dos: sin `reusados`, un prefill
-  // que va «diez veces más rápido» parece un milagro o un error de medida.
-  const procesados = entradaCabeza.length + entrada.length;
-  medida = {
-    promptTokens: ids.length, procesados, reusados: yaIngeridos ? yaIngeridos.length : 0,
-    prefillMs: 0, prefillTokS: 0,
-    genTokens: 0, genMs: 0, genTokS: 0,
-    ttftMs: 0, totalMs: 0, enCurso: true,
-  };
+  // `tLlamada` guarda la entrada a `chat()` para poder dar el tiempo hasta la
+  // primera letra TAL COMO LO ESPERA UN HUMANO, que incluye la tokenización y el
+  // montaje del prompt.
   let tPrefill = 0;
   // ── DÓNDE SE VA EL TIEMPO DE CADA TOKEN ────────────────────────────────────
   // La generación medida de punta a punta salió MUY por debajo de lo que da el
@@ -1046,16 +1320,22 @@ export async function chat(history, system, onToken = () => {}, opts = {}) {
   //     que es cuadrático en la longitud de la respuesta.
   //
   // Sin repartirlo, «la generación va lenta» tiene cuatro causas que se ven
-  // idénticas desde fuera. Cuesta tres relojes por token.
-  let msForward = 0, msReadback = 0, msSample = 0, msDecode = 0;
+  // idénticas desde fuera. Cuesta tres relojes por token. Los acumuladores
+  // nacen con la medida, arriba, para que un turno parado también los cierre.
   for (let paso = 0; paso < tope; paso++) {
+    // Parar se mira en DOS sitios por paso: aquí, antes de encolar trabajo, y
+    // tras leer los logits, antes de emitir. El segundo es el que garantiza que
+    // después de notar el «para» no sale ni un token más: la lectura es la
+    // espera larga del paso, y es justo ahí donde suele llegar.
+    if (senal.aborted) throw errorParado();
     const tF = ahora();
-    const { logits, logitsTokens } = await sesion.forward(entrada);
-    // El forward solo devuelve logits del ÚLTIMO token: calcular los 248.320 de
-    // cada token del prompt costaba casi un segundo y se descartaban todos
-    // menos uno.
+    const { logits, logitsTokens } = await sesion.forward(entrada, { signal: senal });
+    // El forward solo devuelve logits del ÚLTIMO token: antes calculaba los
+    // 248.320 de CADA token del prompt —la cabeza entera, una vez por token— y
+    // se descartaban todos menos los del último.
     const tR = ahora(); msForward += tR - tF;
     const todos = new Float32Array(await readback(gpu.device, logits, 0, logitsTokens * vocab * 4));
+    if (senal.aborted) throw errorParado();
     const ultimo = todos.subarray((logitsTokens - 1) * vocab, logitsTokens * vocab);
     const tS = ahora(); msReadback += tS - tR;
     // Con los tokens ya emitidos, para que la penalización de repetición pueda
@@ -1072,9 +1352,9 @@ export async function chat(history, system, onToken = () => {}, opts = {}) {
     // trabajo de GPU se habría contado en el token siguiente.
     if (paso === 0) {
       tPrefill = ahora();
-      medida.prefillMs = tPrefill - tPrefillIni;
-      medida.prefillTokS = medida.prefillMs > 0 ? procesados / (medida.prefillMs / 1000) : 0;
-      avisar();
+      m.prefillMs = tPrefill - tPrefillIni;
+      m.prefillTokS = m.prefillMs > 0 ? procesados / (m.prefillMs / 1000) : 0;
+      avisar(m);
     }
 
     if (paradas.has(id)) break;
@@ -1082,11 +1362,11 @@ export async function chat(history, system, onToken = () => {}, opts = {}) {
     // La generación se cuenta desde el FIN del prefill, no desde el principio:
     // si no, el primer token arrastra el prompt entero y los tok/s de
     // generación de una respuesta corta serían los del prefill disfrazados.
-    medida.genTokens = salida.length;
-    medida.genMs = ahora() - tPrefill;
-    medida.genTokS = medida.genMs > 0 ? medida.genTokens / (medida.genMs / 1000) : 0;
-    if (!medida.ttftMs) medida.ttftMs = ahora() - tLlamada;
-    avisar();
+    m.genTokens = salida.length;
+    m.genMs = ahora() - tPrefill;
+    m.genTokS = m.genMs > 0 ? m.genTokens / (m.genMs / 1000) : 0;
+    if (!m.ttftMs) m.ttftMs = ahora() - tLlamada;
+    avisar(m);
 
     // Se decodifica la secuencia ENTERA y se emite la diferencia: un token puede
     // partir un carácter multibyte por la mitad, y decodificarlo suelto daría un
@@ -1096,6 +1376,7 @@ export async function chat(history, system, onToken = () => {}, opts = {}) {
     if (nuevo.length > texto.length) {
       onToken(nuevo.slice(texto.length));
       texto = nuevo;
+      hecho.texto = texto;
     }
     msDecode += ahora() - tD;
     entrada = [id];
@@ -1115,20 +1396,12 @@ export async function chat(history, system, onToken = () => {}, opts = {}) {
   console.log(`[engine] turno: salieron ${salida.length} tokens · ` +
     `crudo ${texto.length} car. · devuelto ${limpio.length} car.` +
     (texto ? ` · empieza por ${JSON.stringify(texto.slice(0, 80))}` : ' · NADA'));
-  if (medida) {
-    // El reparto del bucle, para que «va lento» tenga una causa y no cuatro
-    // candidatas indistinguibles. Son acumulados de TODO el turno, prefill
-    // incluido: el primer `forward` es el prompt entero.
-    medida.reparto = { forwardMs: msForward, readbackMs: msReadback, sampleMs: msSample, decodeMs: msDecode };
-    medida.totalMs = ahora() - tLlamada;
-    medida.enCurso = false;
-    avisar();
-    console.log(`[engine] velocidad: prefill ${medida.procesados} tok en ` +
-      `${medida.prefillMs.toFixed(0)} ms (${medida.prefillTokS.toFixed(1)} tok/s` +
-      `${medida.reusados ? `, ${medida.reusados} reusados del prefijo` : ''}) · ` +
-      `generación ${medida.genTokens} tok a ${medida.genTokS.toFixed(1)} tok/s · ` +
-      `primera letra ${medida.ttftMs.toFixed(0)} ms`);
-  }
+  hecho.cerrar();
+  console.log(`[engine] velocidad: prefill ${m.procesados} tok en ` +
+    `${m.prefillMs.toFixed(0)} ms (${m.prefillTokS.toFixed(1)} tok/s` +
+    `${m.reusados ? `, ${m.reusados} reusados del prefijo` : ''}) · ` +
+    `generación ${m.genTokens} tok a ${m.genTokS.toFixed(1)} tok/s · ` +
+    `primera letra ${m.ttftMs.toFixed(0)} ms`);
   return limpio;
 }
 

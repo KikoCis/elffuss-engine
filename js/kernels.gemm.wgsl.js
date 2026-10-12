@@ -41,7 +41,7 @@
 //      habría ido lento y callado— pero se come el 75% del presupuesto, y eso
 //      hunde las ondas residentes. Lo que hizo ganar a 2×4 sobre 4×4 fue
 //      exactamente lo contrario. Se estaría pagando con ocupación lo que se
-//      gana con reúso, y en esta máquina ese cambio no sale a cuenta.
+//      gana con reúso, y ese cambio no sale a cuenta.
 //   2. EL BARRIDO SE HUNDE. Las formas de 256 hilos (2×4 g16×16) piden
 //      (32+64)·128·4 = 49.152 bytes: no caben en ningún caso. O sea que el tipo
 //      del modelo decidiría qué formas se pueden ni siquiera probar.

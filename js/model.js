@@ -62,7 +62,7 @@ export function _getLote() { return loteActual; }
 
 // Cada cuántas capas se le da a la GPU un respiro real para que el compositor
 // del sistema pinte. Un forward del 27B son 64 capas; sin trocear, iban todas
-// en un solo despacho de varios segundos y el sistema colgaba. Ver `ctx.corta`.
+// en un solo despacho larguísimo y el sistema colgaba. Ver `ctx.corta`.
 let cederCada = 2;
 export function _setCeder(n) { cederCada = Math.max(1, n | 0); }
 export function _getCeder() { return cederCada; }
@@ -92,8 +92,35 @@ export function _setCorta(n) { cortaCada = Math.max(1, n | 0); }
 export function _getCorta() { return cortaCada; }
 // Cede un frame al bucle de eventos: en el navegador deja que el compositor
 // del sistema componga; fuera del DOM (tests) basta un turno de macrotarea.
-const nuevoFrame = () => new Promise(r =>
-  (typeof requestAnimationFrame === 'function' ? requestAnimationFrame(() => r()) : setTimeout(r, 0)));
+//
+// Y vuelve TAMBIÉN en cuanto se pide parar. No es un adorno: con la pestaña en
+// segundo plano el navegador deja de dar frames —el rAF no llega hasta que la
+// pestaña se vuelve a ver—, y un prefill esperando aquí no podría atender un
+// «para» hasta entonces. Con la señal, parar no depende de que haya pantalla.
+const nuevoFrame = (senal = null) => new Promise((r) => {
+  if (senal?.aborted) { r(); return; }
+  let id = null, hecho = false;
+  const fin = () => {
+    if (hecho) return;
+    hecho = true;
+    senal?.removeEventListener?.('abort', fin);
+    if (id !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(id);
+    r();
+  };
+  senal?.addEventListener?.('abort', fin, { once: true });
+  if (typeof requestAnimationFrame === 'function') id = requestAnimationFrame(() => fin());
+  else setTimeout(fin, 0);
+});
+
+// El error de «se pidió parar». Lleva el NOMBRE estándar, AbortError, para que
+// quien llama lo distinga de un fallo de verdad sin leer el texto: un turno
+// parado no es un modelo roto, y enseñarlo como «el modelo falló» sería mentir.
+export function errorParado(mensaje = 'parado a petición') {
+  if (typeof DOMException === 'function') return new DOMException(mensaje, 'AbortError');
+  const e = new Error(mensaje);
+  e.name = 'AbortError';
+  return e;
+}
 
 export async function loadModel(ranged, device, opts = {}) {
   const onProgress = opts.onProgress || (() => {});
@@ -173,8 +200,8 @@ export async function loadModel(ranged, device, opts = {}) {
   // pesos de otro sitio. Y un tensor más grande que TRAMO va en su propio tramo
   // y se lee a trozos de CHUNK, igual que antes.
   // Interruptor para poder medir el ANTES y el DESPUÉS en la MISMA sesión: un
-  // x4,7 comparando dos tiradas no vale en esta máquina, donde los absolutos se
-  // mueven hasta x1,45. A 1 byte cada tensor va en su propio tramo y se
+  // x4,7 comparando dos tiradas no vale cuando los absolutos se mueven hasta
+  // x1,45 entre tiradas. A 1 byte cada tensor va en su propio tramo y se
   // recupera el comportamiento de una lectura por tensor.
   // 128 MiB y no 64: barrido en la misma sesión, dos rondas por candidato y
   // orden alternado (`tests/carga.browser.mjs`). Contra el camino viejo —un
@@ -604,8 +631,19 @@ export function createSession(model, opts = {}) {
   }
 
   // UNA pasada: la implementación de siempre, intacta. La trocea `forward`.
-  const unaPasada = async (tokenIds, { tap = null, todosLosLogits = false } = {}) => {
+  //
+  // `signal` se mira en cada FRONTERA DE CAPA, y parar no rompe el lote a
+  // medias: se deja de grabar, el callback devuelve null y `ctx.batch` cierra y
+  // envía lo grabado por su camino normal (ops.js no sabe nada de parar). Lo que
+  // sí hay que hacer antes de lanzar es esperar a la GPU: los uniformes del lote
+  // solo se pueden reciclar después de una sincronización —ver `forward`—, y
+  // quien recibe el error va a reciclar. `state.advance` NO se llama: el lote no
+  // terminó, así que nPast sigue donde estaba y lo que se escribió en la caché
+  // por encima queda tapado por la máscara causal. El estado recurrente sí quedó
+  // a medias, y por eso todo turno empieza con `restaura()` o `reset()`.
+  const unaPasada = async (tokenIds, { tap = null, todosLosLogits = false, signal = null } = {}) => {
     let logitsTokens = 1;
+    let parado = false;
     const tokens = tokenIds.length;
     const taps = new Map();
     const idsBuf = ctx.alloc(tokens * 4, 'ids');
@@ -628,6 +666,7 @@ export function createSession(model, opts = {}) {
       // momento para dejar pintar, y no depender del reloj del forward anterior.
       let ultimoRespiro = -Infinity;
       for (const l of hp.layers) {
+        if (signal?.aborted) { parado = true; break; }
         // Se recicla lo de CADA capa en cuanto termina, en vez de guardarlo
         // todo hasta el final del forward. Sin esto el pico de memoria de GPU
         // crecía con capas × tokens, o sea que con un prompt normal llegaba a
@@ -666,11 +705,15 @@ export function createSession(model, opts = {}) {
           capaN++;
           if (respira) {
             await device.queue.onSubmittedWorkDone();
-            await nuevoFrame();
+            await nuevoFrame(signal);
             ultimoRespiro = performance.now();
           }
         }
       }
+      // La última frontera: tras la última capa solo queda la cabeza, y unos
+      // logits que nadie va a leer no merecen la espera.
+      if (signal?.aborted) parado = true;
+      if (parado) return null;
       const nrm = await nn.rmsnorm(x, get('output_norm.weight'), tokens, E, eps);
       // SOLO EL ÚLTIMO TOKEN. La cabeza es la matriz más grande del modelo
       // (vocabulario × embedding) y para generar solo hace falta la última fila:
@@ -688,6 +731,11 @@ export function createSession(model, opts = {}) {
         E, tokensCabeza);
     });
 
+    if (parado) {
+      // La espera va ANTES de lanzar, no es opcional: ver arriba.
+      await device.queue.onSubmittedWorkDone();
+      throw errorParado();
+    }
     state.advance(tokens);
     // `logitsTokens` dice para CUÁNTOS tokens hay logits: casi siempre 1,
     // aunque `tokens` sea el prompt entero. Sin este dato, quien deduzca el
@@ -724,7 +772,17 @@ export function createSession(model, opts = {}) {
     // No toca ningún kernel ni la numérica: es la misma maquinaria del decode,
     // con nPast avanzando entre lotes. Lo que cambia es cuánto trabajo inútil
     // se hace, no el resultado.
+    //
+    // PARAR: `opts.signal` (un AbortSignal) se mira al entrar, entre lotes y en
+    // cada frontera de capa dentro de un lote. Al entrar no se toca nada; entre
+    // lotes, nPast queda al final del último lote completo; dentro de uno, donde
+    // empezó ese lote. Las tres salidas lanzan un AbortError y dejan la GPU en
+    // reposo, así que `recycle()` es seguro justo después. Todo lote terminado
+    // se avisa por `onProgress`, también el último antes del «para»: lo que se
+    // cuenta es trabajo hecho, y nPast lo incluye.
     async forward(tokenIds, opts = {}) {
+      const senal = opts.signal || null;
+      if (senal?.aborted) throw errorParado();
       // 128 y no 512, y la razón NO es la memoria: es que la GPU tiene que poder
       // ATENDER AL ESCRITORIO entre despacho y despacho. El bucle del SSM recorre
       // todos los tokens del lote DENTRO de un solo despacho, sin ceder; con 512
@@ -762,7 +820,18 @@ export function createSession(model, opts = {}) {
         // consumido. El resultado no era un error: era OTRO token (197 en vez
         // de 62), que es la peor forma de fallar porque sale texto plausible.
         await device.queue.onSubmittedWorkDone();
+        // El aviso va JUSTO DESPUÉS de esa espera y ANTES de mirar la señal: el
+        // lote ya está hecho y nPast lo incluye, así que se cuenta aunque el
+        // prefill se pare aquí mismo. Callarlo dejaría el progreso un lote por
+        // detrás de lo que de verdad entró. Quien no quiera avisos después de
+        // un «para» los filtra él: el proveedor deja de pasarlos a `onPrefill`
+        // en cuanto nota la señal.
         avisa?.(Math.min(i + LOTE, tokenIds.length), tokenIds.length);
+        // Y ahora la señal, con la GPU parada y nPast al final del último lote
+        // completo. Tras el último lote no se mira: el trabajo ya está hecho y
+        // tirarlo no ahorra nada, así que el forward termina y el «para» lo
+        // nota quien llama en su siguiente comprobación.
+        if (senal?.aborted && i + LOTE < tokenIds.length) throw errorParado();
       }
       // `tokens` se corrige al total: quien lo lea espera cuántos entraron, no
       // cuántos traía el último lote.

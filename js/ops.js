@@ -265,8 +265,8 @@ function createContext(device, opts = {}) {
   };
 
   // Agrupa todo lo que ocurra dentro en UN command encoder y UN submit. Con ~423
-  // operaciones por token, hacerlo por operación son ~12.700 sincronizaciones
-  // por segundo a 30 tokens/s, que es coste puro de coordinación.
+  // operaciones por token, hacerlo por operación son ~423 sincronizaciones por
+  // token en vez de una, y eso es coste puro de coordinación.
   ctx.batch = async function (label, fn) {
     if (ctx.pass) return await fn();          // ya estamos dentro de un lote
     if (ctx.profile) return await fn();       // perfilando: cada despacho lleva su propio pass
@@ -289,7 +289,7 @@ function createContext(device, opts = {}) {
   };
 
   // Cierra el command buffer en curso, lo ENVÍA, y abre otro — para que un
-  // forward largo NO sea un único despacho de varios segundos que monopoliza la
+  // forward largo NO sea un único despacho larguísimo que monopoliza la
   // GPU. Troceado en varios, la tarjeta queda libre un instante entre ellos y el
   // compositor del sistema puede pintar; sin eso, el prefill del modelo grande
   // colgaba el equipo: el compositor no conseguía pintar dentro del plazo del
@@ -621,8 +621,8 @@ export function createQuantOps(device, opts = {}) {
         // mediría cuatro veces el mismo shader.
         // 2×4 en un grupo de 8×8 no es lo que usa ggml-webgpu (4×4): es lo que
         // salió del barrido aquí. Menos filas por hilo = menos registros vivos =
-        // más ondas residentes, y en esta máquina eso pesa más que el reúso
-        // extra que daría un TM mayor. Medido x2,29 contra x1,55 de 4×4.
+        // más ondas residentes, y eso pesa más que el reúso extra que daría un
+        // TM mayor. Medido x2,29 contra x1,55 de 4×4.
         //
         // El grupo de 16×8 —128 hilos— salió por delante en un barrido de 3
         // rondas y se llevó una tanda propia de 5 rondas para confirmarlo:
@@ -657,7 +657,7 @@ export function createQuantOps(device, opts = {}) {
         //
         //   · el ganador del barrido CAMBIA entre pasadas — la segunda dio 2x4
         //     en 32x8 como mejor y la supuesta ganadora bajo a x1,12—, o sea
-        //     que el x1,58 era ruido. En esta maquina el tiempo de un matmul
+        //     que el x1,58 era ruido. El tiempo de un matmul
         //     medido en AISLADO varia hasta x5 entre pasadas, con el mismo
         //     tensor y los mismos tokens: solo un A/B en la misma sesion
         //     sobre el forward completo decide algo.
